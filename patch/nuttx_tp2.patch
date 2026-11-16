@@ -1,0 +1,43 @@
+diff --git a/sched/sched/CMakeLists.txt b/sched/sched/CMakeLists.txt
+index 5daf4791..49a60a7e 100644
+--- a/sched/sched/CMakeLists.txt
++++ b/sched/sched/CMakeLists.txt
+@@ -48,7 +48,12 @@ set(SRCS
+     sched_sysinfo.c
+     sched_get_stateinfo.c
+     sched_switchcontext.c
+-    sched_sleep.c)
++    sched_sleep.c
++
++# --- MODIFICACAO TP2 (inicio) -------------------------------------------
++# Arquivo novo do TP2: chamada de sistema tp2_info_tarefa().
++    tp2_info_tarefa.c)
++# --- MODIFICACAO TP2 (fim) ----------------------------------------------
+ 
+ if(NOT CONFIG_SCHED_INLINE_ADDPRIORITIZED)
+   list(APPEND SRCS sched_addprioritized.c)
+diff --git a/sched/sched/Make.defs b/sched/sched/Make.defs
+index a7e5bb8a..257072a6 100644
+--- a/sched/sched/Make.defs
++++ b/sched/sched/Make.defs
+@@ -30,6 +30,11 @@ CSRCS += sched_yield.c sched_rrgetinterval.c sched_foreach.c
+ CSRCS += sched_lock.c sched_unlock.c sched_lockcount.c
+ CSRCS += sched_idletask.c sched_self.c sched_get_stackinfo.c sched_get_tls.c
+ CSRCS += sched_sysinfo.c sched_get_stateinfo.c sched_getcpu.c
++
++# --- MODIFICACAO TP2 (inicio) -------------------------------------------
++# Arquivo novo do TP2: chamada de sistema tp2_info_tarefa().
++CSRCS += tp2_info_tarefa.c
++# --- MODIFICACAO TP2 (fim) ----------------------------------------------
+ CSRCS += sched_switchcontext.c sched_sleep.c
+ 
+ ifneq ($(CONFIG_SCHED_INLINE_ADDPRIORITIZED),y)
+diff --git a/syscall/syscall.csv b/syscall/syscall.csv
+index 7ae03c68..5e9091fc 100644
+--- a/syscall/syscall.csv
++++ b/syscall/syscall.csv
+@@ -225,3 +225,4 @@
+ "waitpid","sys/wait.h","defined(CONFIG_SCHED_WAITPID)","pid_t","pid_t","FAR int *","int"
+ "write","unistd.h","","ssize_t","int","FAR const void *","size_t"
+ "writev","sys/uio.h","","ssize_t","int","FAR const struct iovec *","int"
++"tp2_info_tarefa","nuttx/tp2_info_tarefa.h","","int","pid_t","FAR struct tp2_info_tarefa_s *"

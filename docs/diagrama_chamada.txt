@@ -1,0 +1,81 @@
+FLUXO DA CHAMADA DE SISTEMA tp2_info_tarefa()  (NuttX, build FLAT, ESP32)
+==========================================================================
+
+  APLICACAO (apps/examples/tp2info/tp2info_main.c)
+  ------------------------------------------------
+     struct tp2_info_tarefa_s info;
+     info.tamanho = sizeof(info);        <-- contrato de ABI
+     int ret = tp2_info_tarefa(0, &info);
+                     |
+                     |  (build FLAT: chamada direta de funcao, sem trap/stub;
+                     |   tudo esta ligado no mesmo binario nuttx)
+                     v
+  ---------------------------------------------------------------------
+  KERNEL: sched/sched/tp2_info_tarefa.c
+  ---------------------------------------------------------------------
+   (1) VALIDACAO DOS PARAMETROS
+        if (info == NULL)              -> -EINVAL
+        if (info->tamanho < sizeof(s)) -> -EINVAL
+        if (pid < 0)                   -> -EINVAL
+        memset(info, 0, sizeof(*info))   (nao vaza lixo da pilha)
+
+   (2) SECAO CRITICA  <-- protecao das estruturas internas do SO
+        flags = enter_critical_section();
+                     |
+                     v
+        rtcb = this_task();                  (TCB da tarefa corrente)
+        if (pid == 0)  qtcb = rtcb;
+        else           qtcb = nxsched_get_tcb(pid);   (varre a lista de TCBs)
+                              |
+                              +-- NULL --> -ENOENT
+                     |
+        CONTROLE DE ACESSO:
+          tarefa de aplicacao so le TCB do MESMO grupo de tarefas
+          (rtcb->group != qtcb->group) --> -EACCES
+
+   (3) LEITURA DAS ESTRUTURAS INTERNAS (ainda na secao critica)
+        qtcb->pid                          -> info->pid
+        qtcb->group->tg_pid                -> info->pid_grupo
+        qtcb->group->tg_ppid               -> info->pid_pai
+        qtcb->flags & TCB_FLAG_TTYPE_MASK  -> info->tipo
+        qtcb->sched_priority               -> info->prioridade
+        qtcb->base_priority/init_priority  -> info->prioridade_base
+        qtcb->task_state                   -> info->estado
+        nxsched_get_stateinfo(qtcb, ...)   -> info->estado_texto
+        qtcb->name                         -> info->nome
+        qtcb->adj_stack_size               -> info->pilha_total
+
+        leave_critical_section(flags);
+                     |
+                     v
+   (4) MEDICOES DEMORADAS (fora da secao critica!)
+        up_check_tcbstack(qtcb, pilha_total) -> info->pilha_usada
+             (varre a marca de coloracao da pilha; precisa de
+              CONFIG_STACK_COLORATION=y)
+        clock_cpuload(qtcb->pid, &cpuload)   -> info->cpu_permil
+             (precisa de CONFIG_SCHED_CPULOAD_*=y)
+
+   (5) retorno OK
+
+
+  ---------------------------------------------------------------------
+  TABELA DE RETORNOS
+  ---------------------------------------------------------------------
+    0        sucesso
+   -EINVAL   ponteiro nulo / 'tamanho' invalido / pid negativo
+   -ENOENT   pid nao corresponde a nenhuma tarefa ativa
+   -EACCES   tentativa de ler TCB de outro grupo de tarefas
+
+  ---------------------------------------------------------------------
+  ARQUIVOS ENVOLVIDOS
+  ---------------------------------------------------------------------
+   NOVOS
+     include/nuttx/tp2_info_tarefa.h      (interface publica / struct / erros)
+     sched/sched/tp2_info_tarefa.c        (implementacao no kernel)
+   ALTERADOS
+     sched/sched/Make.defs                (CSRCS += tp2_info_tarefa.c)
+     sched/sched/CMakeLists.txt           (SRCS += tp2_info_tarefa.c)
+     syscall/syscall.csv                  (registro/documentacao da interface)
+   APLICACAO
+     apps/examples/tp2info/tp2info_main.c (+ Kconfig, Make.defs, Makefile,
+                                            CMakeLists.txt)

@@ -1,0 +1,10 @@
+############################################################################
+# apps/examples/tp2info/Make.defs
+#
+# MODIFICACAO TP2: faz o NuttX incluir este diretorio na compilacao
+# quando CONFIG_EXAMPLES_TP2INFO estiver habilitado.
+############################################################################
+
+ifneq ($(CONFIG_EXAMPLES_TP2INFO),)
+CONFIGURED_APPS += $(APPDIR)/examples/tp2info
+endif

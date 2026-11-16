@@ -1,0 +1,31 @@
+#
+# apps/examples/tp2info/Kconfig
+#
+# MODIFICACAO TP2: registro da aplicacao de teste no menuconfig do NuttX.
+#
+
+config EXAMPLES_TP2INFO
+	tristate "\"TP2: teste da chamada de sistema tp2_info_tarefa()\""
+	default n
+	---help---
+		Aplicacao de teste do Segundo Trabalho Pratico. Exercita a chamada
+		de sistema tp2_info_tarefa() incorporada ao kernel do NuttX, tanto
+		em condicoes normais quanto em situacoes de erro.
+
+if EXAMPLES_TP2INFO
+
+config EXAMPLES_TP2INFO_PROGNAME
+	string "Program name"
+	default "tp2info"
+	---help---
+		Nome do programa usado pelo shell NSH.
+
+config EXAMPLES_TP2INFO_PRIORITY
+	int "Task priority"
+	default 100
+
+config EXAMPLES_TP2INFO_STACKSIZE
+	int "Stack size"
+	default DEFAULT_TASK_STACKSIZE
+
+endif
