@@ -20,122 +20,78 @@
  *
  ****************************************************************************/
 
-/* ==========================================================================
- * SEGUNDO TRABALHO PRÁTICO - SISTEMAS OPERACIONAIS
- * --------------------------------------------------------------------------
- * ARQUIVO NOVO: implementação da chamada de sistema tp2_info_tarefa().
- *
- * ONDE ESTE ARQUIVO FICA: sched/sched/ -> é o diretório do subsistema de
- * escalonamento do NuttX. É aqui que vivem as funções que manipulam o TCB
- * (sched_gettcb.c, sched_get_stackinfo.c, sched_get_stateinfo.c, ...), logo
- * a nova funcionalidade foi incorporada ao subsistema apropriado, seguindo
- * a organização e as convenções de codificação do projeto.
- *
- * O QUE A FUNÇÃO FAZ (resumo):
- *   1) valida os parâmetros recebidos do espaço de usuário;
- *   2) localiza o TCB da tarefa alvo (a própria tarefa se pid == 0);
- *   3) aplica o controle de acesso (tarefa de kernel x tarefa de aplicação);
- *   4) entra em SEÇÃO CRÍTICA (desabilita interrupções) e copia os campos do
- *      TCB para a estrutura de saída -> evita leitura inconsistente;
- *   5) fora da seção crítica, mede o pico de uso da pilha e a carga de CPU
- *      (essas medições são demoradas; mantê-las dentro da seção crítica
- *      deixaria o sistema com interrupções desabilitadas por muito tempo);
- *   6) devolve OK ou um errno negativo.
- * ========================================================================== */
+#include <nuttx/config.h> /* Inclui as configurações gerais do NuttX. */
 
-/****************************************************************************
- * Included Files
- ****************************************************************************/
-
-#include <nuttx/config.h>
-
-#include <sys/types.h>
-#include <stdint.h>
-#include <string.h>
-#include <errno.h>
+#include <sys/types.h> /* Define tipos utilizados pelo sistema, como pid_t. */
+#include <stdint.h> /* Disponibiliza tipos inteiros com tamanho definido, como uint8_t, uint16_t e uint32_t. */
+#include <string.h> /* Disponibiliza funções para manipulação de memória, como memset(). */
+#include <errno.h>/* Disponibiliza os códigos de erro, como EINVAL, ENOENT e EACCES. */
 
 #include <nuttx/irq.h>          /* enter_critical_section / leave_...        */
-#include <nuttx/arch.h>         /* up_check_tcbstack (medição da pilha)      */
-#include <nuttx/clock.h>        /* clock_cpuload / struct cpuload_s          */
-#include <nuttx/sched.h>        /* struct tcb_s, nxsched_get_tcb, ...        */
+#include <nuttx/arch.h>         /* Disponibiliza funções específicas da arquitetura. verifica a utilização da pilha da tarefa */
+#include <nuttx/clock.h>        /* Disponibiliza recursos relacionados ao relógio e à medição da utilização da CPU.  */
+#include <nuttx/sched.h>        /* Disponibiliza estruturas e funções do escalonador   */
 #include <nuttx/tp2_info_tarefa.h>
 
-#include "sched/sched.h"        /* cabeçalho interno do subsistema sched     */
+#include "sched/sched.h"     /* cabeçalho interno do subsistema sched Permite acessar definições internas do escalonador */
 
-/****************************************************************************
- * Pre-processor Definitions
- ****************************************************************************/
-
-/* O NuttX só compila a medição de pilha por "coloração" quando
- * CONFIG_STACK_COLORATION=y (no ESP32 isso é feito em
- * arch/xtensa/src/common/xtensa_checkstack.c). Sem esse recurso, o campo
- * pilha_usada volta zerado e o sinalizador TP2_SINAL_PILHA_MEDIDA fica
- * desligado, para que a aplicação saiba que o dado não foi medido.
- */
+/* Verifica se o NuttX foi configurado para utilizar
+ * a técnica de Stack Coloration.
+ *
+ * CONFIG_STACK_COLORATION permite acompanhar o uso
+ * da pilha por meio da análise da memória preenchida
+ * pelo sistema.
+ *
+ * Se estiver habilitado, ativamos nossa medição. */
 
 #undef TP2_TEM_MEDICAO_PILHA
 #ifdef CONFIG_STACK_COLORATION
 #  define TP2_TEM_MEDICAO_PILHA 1
 #endif
 
-/* O mesmo raciocínio vale para a carga de CPU: a função clock_cpuload()
- * só é declarada quando CONFIG_SCHED_CPULOAD_NONE NÃO está definido.
- */
+/* Verifica se a medição de carga da CPU está disponível.
+ *
+ * CONFIG_SCHED_CPULOAD_NONE indica que o monitoramento
+ * da utilização da CPU está desabilitado.
+ *
+ * Se essa configuração NÃO estiver definida, habilitamos
+ * a medição da CPU neste trabalho. */
 
 #undef TP2_TEM_MEDICAO_CPU
 #ifndef CONFIG_SCHED_CPULOAD_NONE
 #  define TP2_TEM_MEDICAO_CPU 1
 #endif
 
-/****************************************************************************
- * Private Functions
- ****************************************************************************/
-
-/****************************************************************************
- * Name: tp2_tipo_da_tarefa
+/*
+ * OBJETIVO:
+ * Identificar qual é o tipo da tarefa consultada.
  *
- * Description:
- *   Decodifica os dois bits de tipo de thread do campo 'flags' do TCB
- *   (TCB_FLAG_TTYPE_MASK) em um dos valores TP2_TIPO_* da interface pública.
+ * RECEBE:
+ * Um ponteiro para a estrutura TCB da tarefa.
  *
- ****************************************************************************/
+ * TCB significa Task Control Block.
+ * É a estrutura interna do NuttX que guarda informações
+ * sobre uma tarefa ou thread.
+ *
+ * RETORNA:
+ * TP2_TIPO_TAREFA, TP2_TIPO_PTHREAD ou TP2_TIPO_KERNEL.
+ */
 
 static uint8_t tp2_tipo_da_tarefa(FAR const struct tcb_s *tcb)
 {
   switch (tcb->flags & TCB_FLAG_TTYPE_MASK)
     {
-      case TCB_FLAG_TTYPE_PTHREAD:
+      case TCB_FLAG_TTYPE_PTHREAD: /* Se for uma thread criada com pthread_create(). */
         return TP2_TIPO_PTHREAD;
 
-      case TCB_FLAG_TTYPE_KERNEL:
+      case TCB_FLAG_TTYPE_KERNEL:   /* Se for uma thread pertencente ao kernel. */
         return TP2_TIPO_KERNEL;
 
-      case TCB_FLAG_TTYPE_TASK:
+      case TCB_FLAG_TTYPE_TASK:    /* Se for uma tarefa comum (task) */
       default:
         return TP2_TIPO_TAREFA;
     }
 }
-
-/****************************************************************************
- * Public Functions
- ****************************************************************************/
-
-/****************************************************************************
- * Name: tp2_info_tarefa
- *
- * Description:
- *   Consulta o TCB de uma tarefa e devolve o instantâneo de suas
- *   informações (ver documentação completa no cabeçalho público
- *   include/nuttx/tp2_info_tarefa.h).
- *
- * Input Parameters:
- *   pid  - 0 = a própria tarefa; >0 = pid/tid alvo.
- *   info - estrutura de saída (não nula, com o campo 'tamanho' preenchido).
- *
- * Returned Value:
- *   OK (0) ou errno negativo (-EINVAL, -ENOENT, -EACCES).
- *
- ****************************************************************************/
 
 int tp2_info_tarefa(pid_t pid, FAR struct tp2_info_tarefa_s *info)
 {
@@ -145,225 +101,179 @@ int tp2_info_tarefa(pid_t pid, FAR struct tp2_info_tarefa_s *info)
   uint16_t tamanho_pedido;      /* tamanho informado pelo chamador        */
   size_t pilha_total;           /* cópia do tamanho da pilha              */
 
-  /* ------------------------------------------------------------------------
-   * 1) VALIDAÇÃO DOS PARÂMETROS RECEBIDOS DO ESPAÇO DE USUÁRIO
-   *    Nunca se deve confiar em ponteiros/valores vindos da aplicação.
-   * ---------------------------------------------------------------------- */
-
-  if (info == NULL)
+  if (info == NULL)  /* ponteiro nulo: não há onde escrever o resultado */
     {
-      /* Ponteiro nulo: não há onde escrever o resultado */
-
-      return -EINVAL;
+      return -EINVAL;   /* Parâmetro inválido */
     }
 
-  /* O chamador é obrigado a declarar o tamanho do seu buffer. Isso permite
-   * validar a compatibilidade entre a aplicação e o kernel (ABI) e evita
-   * que o kernel escreva além do buffer do usuário caso a estrutura mude
-   * de tamanho no futuro.
-   */
-
-  tamanho_pedido = info->tamanho;
-  if (tamanho_pedido < sizeof(struct tp2_info_tarefa_s))
+  tamanho_pedido = info->tamanho;    /* Lê o tamanho informado pelo chamador */
+  if (tamanho_pedido < sizeof(struct tp2_info_tarefa_s))    /* tamanho insuficiente para armazenar o resultado */
     {
-      return -EINVAL;
+      return -EINVAL;   /* Parâmetro inválido */
     }
 
-  if (pid < 0)
+  if (pid < 0)  /* pid: identificador da tarefa que queremos consultar, não pode ser negativo*/
     {
-      return -EINVAL;
+      return -EINVAL;    /* Parâmetro inválido */
     }
 
-  /* Zera a estrutura para que nenhum campo fique com "lixo" da pilha do
-   * chamador (informação não inicializada não deve vazar para o usuário).
-   * O campo 'tamanho' é preservado.
-   */
-
-  memset(info, 0, sizeof(struct tp2_info_tarefa_s));
-  info->tamanho = tamanho_pedido;
-  info->versao  = TP2_VERSAO_ATUAL;
-
-  /* ------------------------------------------------------------------------
-   * 2) ENTRADA NA SEÇÃO CRÍTICA
-   *    Vamos manipular as estruturas internas do sistema operacional (o TCB
-   *    e o grupo de tarefas). Sem proteção, uma interrupção poderia alterar
-   *    o estado da tarefa no meio da leitura, gerando uma cópia
-   *    inconsistente (por exemplo: prioridade nova com estado antigo).
-   *    A chamada é aninhável: enter_critical_section() pode ser chamada
-   *    dentro de outra seção crítica, como fazem as funções internas do
-   *    NuttX.
-   * ---------------------------------------------------------------------- */
+  memset(info, 0, sizeof(struct tp2_info_tarefa_s));  /* evita que campos não preenchidos contenham lixo de memória*/
+  info->tamanho = tamanho_pedido;                    /* Restaura o tamanho informado pelo chamador*/
+  info->versao  = TP2_VERSAO_ATUAL;                 /* Informa qual é a versão da estrutura utilizada. */
 
   flags = enter_critical_section();
 
-  rtcb = this_task();                 /* tarefa atualmente em execução     */
-  if (rtcb == NULL)
+  rtcb = this_task();  /* tarefa atualmente em execução e retorna a estrutura de controle da tarefa atualmente em execução    */
+  if (rtcb == NULL)   /* Verifica se foi possível obter o TCB atual. */
     {
-      leave_critical_section(flags);
-      return -ENOENT;
+      leave_critical_section(flags);   /* Sai da seção crítica e restaura as interrupções. */
+      return -ENOENT;    /* Tarefa não encontrada */
     }
 
   if (pid == 0)
     {
-      /* pid 0 significa "eu mesmo" (mesma convenção usada em
-       * nxsched_get_stackinfo()).
-       */
-
-      qtcb = rtcb;
+      qtcb = rtcb;   /* Se o pid for 0, significa que queremos consultar a própria tarefa. */
     }
-  else
+  else       /* Se não procuramos no escalonador a tarefa que corresponde a esse PID.*/
     {
-      /* nxsched_get_tcb() percorre a lista de tarefas do sistema e devolve o
-       * TCB correspondente ao pid informado (NULL se não existir).
-       */
+      qtcb = nxsched_get_tcb(pid);   /* Retorna o TCB da tarefa encontrada */ 
 
-      qtcb = nxsched_get_tcb(pid);
+      /* Se o resultado for NULL, significa que não encontramos uma tarefa com esse PID. */
       if (qtcb == NULL)
         {
           leave_critical_section(flags);
-          return -ENOENT;
+          return -ENOENT;    /* Tarefa não encontrada */
         }
 
-      /* --------------------------------------------------------------------
-       * 3) CONTROLE DE ACESSO
-       *    Uma tarefa de aplicação só pode inspecionar tarefas do próprio
-       *    grupo de tarefas. Somente threads de kernel podem olhar qualquer
-       *    TCB (mesma regra adotada por nxsched_get_stackinfo()).
-       * ------------------------------------------------------------------ */
-
+      /* Verifica se a tarefa que está fazendo a consulta
+       * pertence ao kernel.
+       *
+       * Se NÃO for uma tarefa do kernel, verificamos
+       * se a tarefa consultada pertence ao mesmo grupo.
+       *
+       * rtcb->group representa o grupo da tarefa atual.
+       * qtcb->group representa o grupo da tarefa consultada.
+       *
+       * Se os grupos forem diferentes, a consulta é negada. */
       if ((rtcb->flags & TCB_FLAG_TTYPE_MASK) != TCB_FLAG_TTYPE_KERNEL &&
           rtcb->group != qtcb->group)
         {
-          leave_critical_section(flags);
-          return -EACCES;
+          leave_critical_section(flags);   /* Restaura as interrupções antes de sair. */
+          return -EACCES;                /* Sem permissão para consultar a tarefa */
         }
     }
 
-  /* ------------------------------------------------------------------------
-   * 4) CÓPIA DOS CAMPOS INTERNOS DO NUTTX (ainda dentro da seção crítica)
-   * ---------------------------------------------------------------------- */
+  info->pid       = qtcb->pid;               /* identificador individual da tarefa. */
+  info->pid_grupo = qtcb->group->tg_pid;   /* identificador do grupo de tarefas ao qual a tarefa pertence. */
 
-  /* ID da thread (campo 'pid' do TCB) e ID do processo/grupo de tarefas
-   * (campo tg_pid da struct task_group_s). Esta é exatamente a distinção
-   * "ID da tarefa x ID do processo" discutida em sala.
-   */
-
-  info->pid       = qtcb->pid;
-  info->pid_grupo = qtcb->group->tg_pid;
-
-#if defined(CONFIG_SCHED_HAVE_PARENT)
-  info->pid_pai   = qtcb->group->tg_ppid;
+#if defined(CONFIG_SCHED_HAVE_PARENT)  /* Verifica se NuttX possui suporte à informação do processo pai. */
+  info->pid_pai   = qtcb->group->tg_ppid;  /* Se sim, obtém o PID do processo pai. */
 #else
-  info->pid_pai   = (pid_t)-1;
+  info->pid_pai   = (pid_t)-1;  /* Se não, utiliza -1 para indicar que a informação não está disponível. */
 #endif
 
+  /* Chama a função tp2_tipo_da_tarefa e analisa as flags do TCB se a tarefa é TASK, PTHREAD ou KERNEL*/
   info->tipo      = tp2_tipo_da_tarefa(qtcb);
 
-  /* Prioridade: 'sched_priority' é a prioridade efetiva (pode ter sido
-   * elevada por herança de prioridade). 'base_priority' guarda a prioridade
-   * original; sem CONFIG_PRIORITY_INHERITANCE o equivalente é
-   * 'init_priority'.
-   */
+  info->prioridade      = qtcb->sched_priority;  /* Obtem a prioridade atual da tarefa consultada atraves de sched_priority*/
 
-  info->prioridade      = qtcb->sched_priority;
-
+  /* Configuração de NuttX para utilizar o mecanismo de Priority Inheritance. */
 #ifdef CONFIG_PRIORITY_INHERITANCE
-  info->prioridade_base = qtcb->base_priority != 0 ?
-                          qtcb->base_priority : qtcb->sched_priority;
-  if (qtcb->base_priority != 0 && qtcb->base_priority != qtcb->sched_priority)
+  info->prioridade_base = qtcb->base_priority != 0 ?  /* Se base_priority for diferente de zero, utiliza-a como prioridade base. */
+                          qtcb->base_priority : qtcb->sched_priority;                        
+  if (qtcb->base_priority != 0 && qtcb->base_priority != qtcb->sched_priority)  /* Se a prioridade herdada for diferente da prioridade atual*/
     {
-      info->sinalizadores |= TP2_SINAL_PRIO_HERDADA;
+      info->sinalizadores |= TP2_SINAL_PRIO_HERDADA;  /* Sinaliza que a prioridade herdada está ativa. */
     }
 #else
-  info->prioridade_base = qtcb->init_priority;
+  /* Se o mecanismo de Priority Inheritance não estiver habilitado, utiliza init_priority como prioridade base. */
+  info->prioridade_base = qtcb->init_priority;  
 #endif
 
-  /* Estado do escalonamento (enum tstate_e: RUNNING, READYTORUN,
-   * WAIT_SEM, WAIT_SIG, INACTIVE, ...).
-   */
+  /* Obtem o estado atual da tarefa consultada atraves de task_state*/
+  /* task_state valor numérico que representa estado da tarefa no escalonador.
+   * Por exemplo: READY, RUNNING, WAITING ou INACTIVE */
+  info->estado = (uint8_t)qtcb->task_state; 
 
-  info->estado = (uint8_t)qtcb->task_state;
-
-  /* Versão textual do estado: reutiliza a função interna do NuttX em vez de
-   * duplicar a tabela de nomes de estado no nosso código.
-   */
-
+  /* Obtém uma descrição textual do estado da tarefa consultada. */
   nxsched_get_stateinfo(qtcb, info->estado_texto,
-                        sizeof(info->estado_texto));
+                        sizeof(info->estado_texto)); 
 
-  /* Nome da tarefa (opcional na configuração: CONFIG_TASK_NAME_SIZE). */
-
-#if CONFIG_TASK_NAME_SIZE > 0
+#if CONFIG_TASK_NAME_SIZE > 0  /* Verifica se o NuttX foi configurado para armazenar nomes de tarefas. */
+  /* strlcpy() limita a quantidade de caracteres copiados, evitando ultrapassar o tamanho do vetor de destino*/
   strlcpy(info->nome, qtcb->name, sizeof(info->nome));
-#else
+#else   /* Se o armazenamento de nomes estiver desabilitado, colocamos um ponto de interrogação. */
   strlcpy(info->nome, "?", sizeof(info->nome));
 #endif
 
-  /* Dados da pilha: campos mantidos pelo gerenciamento de memória do NuttX
-   * dentro do TCB (adj_stack_size, stack_alloc_ptr, stack_base_ptr).
-   */
+  /* adj_stack_size representa o tamanho ajustado da pilha em bytes*/
+  pilha_total        = qtcb->adj_stack_size;       /* Obtém o tamanho total da pilha da tarefa consultada. */
+  info->pilha_total  = pilha_total;               /* Armazena o tamanho total da pilha da tarefa consultada. */
 
-  pilha_total        = qtcb->adj_stack_size;
-  info->pilha_total  = pilha_total;
+  leave_critical_section(flags);  /* Sai da seção crítica e restaura o estado das interrupções. */
 
-  /* ------------------------------------------------------------------------
-   * 5) SAÍDA DA SEÇÃO CRÍTICA
-   *    A partir daqui o TCB pode mudar. As duas medições seguintes são
-   *    demoradas (varredura de toda a pilha) e por isso são feitas com as
-   *    interrupções já reabilitadas.
-   * ---------------------------------------------------------------------- */
-
-  leave_critical_section(flags);
-
-  /* ------------------------------------------------------------------------
-   * 5.1) PICO DE USO DA PILHA (gerenciamento de memória)
-   *      up_check_tcbstack() varre a pilha procurando a marca de coloração
-   *      mais profunda que ainda está intacta e devolve quantos bytes já
-   *      foram efetivamente usados. É a mesma função usada pelo procfs
-   *      (campo "StackUsed") e pelo despejo de falhas (assert/coredump).
-   * ---------------------------------------------------------------------- */
-
-#if defined(TP2_TEM_MEDICAO_PILHA)
-  if (pilha_total > 0)
+#if defined(TP2_TEM_MEDICAO_PILHA)  /* Se a medição da pilha estiver habilitada */
+  if (pilha_total > 0) /* Verifica se a tarefa possui uma pilha com tamanho maior que zero*/
     {
-      info->pilha_usada = up_check_tcbstack(qtcb, pilha_total);
+      /* up_check_tcbstack() analisa a pilha da tarefa e estima o pico de utilização.*/
+      info->pilha_usada = up_check_tcbstack(qtcb, pilha_total); /*O resultado é armazenado em pilha_usada.*/
 
-      if (info->pilha_usada > pilha_total)
+      if (info->pilha_usada > pilha_total) /* Se o pico de utilização for maior que o tamanho total da pilha*/
         {
           info->pilha_usada = pilha_total;      /* saturação defensiva      */
         }
 
-      /* Percentual em "por mil" evita ponto flutuante no kernel (o NuttX
-       * pode ser compilado sem suporte a float).
-       */
+      /* Calcula a utilização da pilha em milésimos.
+       *
+       * Exemplo:
+       * Pilha total = 1000 bytes
+       * Pilha usada = 500 bytes
+       *
+       * (500 * 1000) / 1000 = 500
+       *
+       * O resultado 500 representa 50,0%.
+       *
+       * Utilizei uint64_t na multiplicação para
+       * reduzir o risco de estouro numérico. */
+      info->pilha_uso_permil = (uint32_t)                                   /* Calcula a utilização da pilha em milésimos. */
+        (((uint64_t)info->pilha_usada * 1000u) / (uint64_t)pilha_total);  /* Armazena o resultado em pilha_uso_permil. */
 
-      info->pilha_uso_permil = (uint32_t)
-        (((uint64_t)info->pilha_usada * 1000u) / (uint64_t)pilha_total);
-
+      /* Informa que a medição da pilha foi realizada e que o campo pilha_usada contém um valor válido. */
       info->sinalizadores |= TP2_SINAL_PILHA_MEDIDA;
     }
 #endif
 
-  /* ------------------------------------------------------------------------
-   * 5.2) CARGA DE CPU DA TAREFA (escalonamento / monitoramento)
-   *      clock_cpuload() informa quantos tiques de clock a tarefa ficou
-   *      ativa em relação ao total de tiques contabilizados.
-   * ---------------------------------------------------------------------- */
-
-#if defined(TP2_TEM_MEDICAO_CPU)
+  /* Se o monitoramento de carga da CPU estiver habilitado. */
+#if defined(TP2_TEM_MEDICAO_CPU) /* Obtemos a utilização da CPU da tarefa consultada. */
   {
-    struct cpuload_s cpuload;
-    pid_t pid_alvo = qtcb->pid;   /* pid real (pid == 0 = "eu mesmo")     */
+    struct cpuload_s cpuload; /* Estrutura que armazena informações sobre a carga da CPU fornecidos pelo NuttX*/
+    pid_t pid_alvo = qtcb->pid;   /* PID da tarefa consultada */
 
-    if (clock_cpuload(pid_alvo, &cpuload) == OK && cpuload.total > 0)
+    /* Se a função clock_cpuload() retornar OK e o total de ciclos for maior que zero, significa que a medição foi bem-sucedida */
+    /* Calcula a porcentagem de utilização da CPU.
+     *
+     * active = tempo em que a tarefa esteve ativa.
+     * total  = tempo total considerado na medição.
+     *
+     * Multiplicamos por 1000 para representar
+     * o resultado em milésimos.
+     *
+     * Exemplo:
+     * active = 250
+     * total  = 1000
+     *
+     * Resultado = 250
+     * Isso representa 25,0%. */
+    if (clock_cpuload(pid_alvo, &cpuload) == OK && cpuload.total > 0) 
       {
-        info->cpu_permil = (uint32_t)
-          (((uint64_t)cpuload.active * 1000u) / (uint64_t)cpuload.total);
+        info->cpu_permil = (uint32_t) /* Calcula a porcentagem de utilização da CPU em milésimos. */
+          (((uint64_t)cpuload.active * 1000u) / (uint64_t)cpuload.total);  /* Armazena o resultado em cpu_permil. */
 
-        info->sinalizadores |= TP2_SINAL_CPU_MEDIDA;
+        /* Informa que a medição da CPU foi realizada e que campo cpu_permil contém um valor válido. */
+        info->sinalizadores |= TP2_SINAL_CPU_MEDIDA; 
       }
   }
 #endif
 
-  return OK;
+  return OK; /* consulta foi realizada com sucesso. */
 }
